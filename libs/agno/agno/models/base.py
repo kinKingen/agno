@@ -91,10 +91,13 @@ def _log_messages(messages: List[Message]) -> None:
         m.log(metrics=False)
 
 
-def _handle_agent_exception(a_exc: AgentRunException, additional_input: Optional[List[Message]] = None) -> None:
+def _handle_agent_exception(
+    a_exc: AgentRunException, additional_input: Optional[List[Message]] = None
+) -> Optional[Message]:
     """Handle AgentRunException and collect additional messages."""
     if additional_input is None:
         additional_input = []
+    agent_message = None
     if a_exc.user_message is not None:
         msg = (
             Message(role="user", content=a_exc.user_message)
@@ -104,12 +107,12 @@ def _handle_agent_exception(a_exc: AgentRunException, additional_input: Optional
         additional_input.append(msg)
 
     if a_exc.agent_message is not None:
-        msg = (
+        agent_message = (
             Message(role="assistant", content=a_exc.agent_message)
             if isinstance(a_exc.agent_message, str)
             else a_exc.agent_message
         )
-        additional_input.append(msg)
+        additional_input.append(agent_message)
 
     if a_exc.messages:
         for m in a_exc.messages:
@@ -124,6 +127,8 @@ def _handle_agent_exception(a_exc: AgentRunException, additional_input: Optional
     if a_exc.stop_execution:
         for m in additional_input:
             m.stop_after_tool_call = True
+
+    return agent_message
 
 
 @dataclass
@@ -2155,14 +2160,16 @@ class Model(ABC):
         # Run function calls sequentially
         function_execution_result: FunctionExecutionResult = FunctionExecutionResult(status="failure")
         stop_after_tool_call_from_exception = False
+        stop_agent_message = None
         try:
             function_execution_result = function_call.execute()
         except AgentRunException as a_exc:
             # Update additional messages from function call
-            _handle_agent_exception(a_exc, additional_input)
+            agent_exception_message = _handle_agent_exception(a_exc, additional_input)
             # If stop_execution is True, mark that we should stop after this tool call
             if a_exc.stop_execution:
                 stop_after_tool_call_from_exception = True
+                stop_agent_message = agent_exception_message
             # Set function call success to False if an exception occurred
         except RunCancelledException:
             raise
@@ -2260,6 +2267,11 @@ class Model(ABC):
 
             if function_call.function.show_result and function_call_output is not None:
                 yield ModelResponse(content=function_call_output)
+
+        if stop_agent_message is not None:
+            agent_message_content = stop_agent_message.get_content_string()
+            if agent_message_content:
+                yield ModelResponse(role=self.assistant_message_role, content=agent_message_content)
 
         # Create ToolCallMetrics for the tool execution
         tool_metrics = None
@@ -2844,13 +2856,15 @@ class Model(ABC):
 
             # Handle AgentRunException
             stop_after_tool_call_from_exception = False
+            stop_agent_message = None
             if isinstance(function_call_success, AgentRunException):
                 a_exc = function_call_success
                 # Update additional messages from function call
-                _handle_agent_exception(a_exc, additional_input)
+                agent_exception_message = _handle_agent_exception(a_exc, additional_input)
                 # If stop_execution is True, mark that we should stop after this tool call
                 if a_exc.stop_execution:
                     stop_after_tool_call_from_exception = True
+                    stop_agent_message = agent_exception_message
                 # Set function call success to False if an exception occurred
                 function_call_success = False
 
@@ -2941,6 +2955,11 @@ class Model(ABC):
 
                 if function_call.function.show_result and function_call_output is not None:
                     yield ModelResponse(content=function_call_output)
+
+            if stop_agent_message is not None:
+                agent_message_content = stop_agent_message.get_content_string()
+                if agent_message_content:
+                    yield ModelResponse(role=self.assistant_message_role, content=agent_message_content)
 
             # Create ToolCallMetrics for the tool execution
             tool_metrics = None
